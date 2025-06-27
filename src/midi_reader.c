@@ -1,10 +1,12 @@
-// midi_reader.c
 #include <stdio.h>
 #include <stdlib.h>
 #include <alsa/asoundlib.h>
 #include "midi_reader.h"
 #include "midi_output.h"
 #include "note_utils.h"
+#include "midi_keymap.h"
+#include "uinput_helper.h"
+#include <stdbool.h>
 
 void midi_send_program_change(snd_seq_t *seq_handle, int out_port, int program) {
     snd_seq_event_t ev;
@@ -17,19 +19,17 @@ void midi_send_program_change(snd_seq_t *seq_handle, int out_port, int program) 
 }
 
 void midi_key_monitor(void) {
-    snd_seq_t *seq_handle;
-    int in_port;
-    snd_seq_event_t *event;
+    snd_seq_t *seq_handle = NULL;
+    snd_seq_t *out_seq_handle = NULL;
+    int in_port = -1, out_port = -1;
+    snd_seq_event_t *event = NULL;
 
-    // MIDI output setup
-    snd_seq_t *out_seq_handle;
-    int out_port;
     midi_output_init(&out_seq_handle, &out_port);
 
-    // Open sequencer
     if (snd_seq_open(&seq_handle, "default", SND_SEQ_OPEN_INPUT, 0) < 0) {
         fprintf(stderr, "Error opening ALSA sequencer.\n");
-        exit(1);
+        snd_seq_close(out_seq_handle);
+        exit(EXIT_FAILURE);
     }
 
     snd_seq_set_client_name(seq_handle, "MIDI Key Monitor");
@@ -39,35 +39,62 @@ void midi_key_monitor(void) {
 
     if (in_port < 0) {
         fprintf(stderr, "Error creating sequencer port.\n");
-        exit(1);
+        snd_seq_close(seq_handle);
+        snd_seq_close(out_seq_handle);
+        exit(EXIT_FAILURE);
     }
+
+    midi_send_program_change(out_seq_handle, out_port, 24);
 
     printf("Listening for MIDI Note On/Off events...\n");
 
-    while (1) {
-        snd_seq_event_input(seq_handle, &event);
+    load_midi_keymap("include/midi_keymap.txt");
+    int uinput_fd = uinput_setup();
+    if (uinput_fd < 0) {
+        fprintf(stderr, "Error setting up uinput. Try running as root or check /dev/uinput permissions.\n");
+        snd_seq_close(seq_handle);
+        snd_seq_close(out_seq_handle);
+        exit(EXIT_FAILURE);
+    }
+
+    while (true) {
+        if (snd_seq_event_input(seq_handle, &event) < 0) {
+            fprintf(stderr, "Error reading MIDI event.\n");
+            break;
+        }
         printf("DEBUG: Received event type: %d\n", event->type);
-        fflush(stdout);
+
+        const midi_action_t *action = get_midi_action(event->data.note.note);
         if (event->type == SND_SEQ_EVENT_NOTEON && event->data.note.velocity > 0) {
             printf("Note ON  - Key: %d (%s)  Velocity: %d\n",
                    event->data.note.note,
                    midi_note_to_name(event->data.note.note),
                    event->data.note.velocity);
+            if (action) {
+                if (action->type == ACTION_KEY) uinput_send_key(uinput_fd, action->value, 1);
+                else if (action->type == ACTION_MOUSE_BTN) uinput_send_mouse_btn(uinput_fd, action->value, 1);
+                else if (action->type == ACTION_MOUSE_MOVE) uinput_send_mouse_move(uinput_fd, action->value);
+            }
             midi_send_note_on(out_seq_handle, out_port, event->data.note.note, event->data.note.velocity);
-        } else if (event->type == SND_SEQ_EVENT_NOTEOFF || 
+        } else if (event->type == SND_SEQ_EVENT_NOTEOFF ||
                    (event->type == SND_SEQ_EVENT_NOTEON && event->data.note.velocity == 0)) {
             printf("Note OFF - Key: %d (%s)\n",
                    event->data.note.note,
                    midi_note_to_name(event->data.note.note));
+            if (action) {
+                if (action->type == ACTION_KEY) uinput_send_key(uinput_fd, action->value, 0);
+                else if (action->type == ACTION_MOUSE_BTN) uinput_send_mouse_btn(uinput_fd, action->value, 0);
+            }
             midi_send_note_off(out_seq_handle, out_port, event->data.note.note);
         }
-        fflush(stdout);
     }
 
+    uinput_cleanup(uinput_fd);
     snd_seq_close(seq_handle);
+    snd_seq_close(out_seq_handle);
 }
 
-int main() {
+int main(void) {
     midi_key_monitor();
     return 0;
 }

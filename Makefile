@@ -3,7 +3,7 @@ CFLAGS = -Wall -Wextra -Iinclude
 LDFLAGS = -lasound
 SRC = $(wildcard src/*.c)
 OBJ = $(SRC:src/%.c=build/%.o)
-TARGET = build/only-c
+TARGET = build/doom-piano
 
 all: build $(TARGET)
 
