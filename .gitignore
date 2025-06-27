@@ -1,0 +1,10 @@
+# Build output
+build/
+*.o
+*.out
+*.exe
+*.log
+# Editor files
+*~
+*.swp
+.vscode/
